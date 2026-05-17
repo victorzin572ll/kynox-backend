@@ -1,0 +1,24 @@
+{
+  "version": 2,
+  "builds": [
+    {
+      "src": "server.js",
+      "use": "@vercel/node"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/(.*)",
+      "dest": "server.js"
+    }
+  ],
+  "env": {
+    "EFI_CLIENT_ID": "@efi_client_id",
+    "EFI_CLIENT_SECRET": "@efi_client_secret",
+    "EFI_PIX_KEY": "@efi_pix_key",
+    "EFI_CERT_PATH": "./certs/producao-873607-kynox.p12",
+    "EFI_SANDBOX": "false",
+    "WEBHOOK_SECRET": "@webhook_secret",
+    "SITE_URL": "@site_url"
+  }
+}
