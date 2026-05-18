@@ -44,23 +44,36 @@ async function efiApi() {
   return axios.create({ baseURL: BASE_URL, httpsAgent: getAgent(), headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' } });
 }
 
-app.get('/', (req, res) => res.json({ ok: true, servico: 'Kynox Buxx PIX', versao: '3.0.0' }));
+// Gera txid válido: 26-35 caracteres alfanuméricos
+function gerarTxid() {
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+  const len = 35;
+  let result = '';
+  for (let i = 0; i < len; i++) result += chars[Math.floor(Math.random() * chars.length)];
+  return result;
+}
+
+app.get('/', (req, res) => res.json({ ok: true, servico: 'Kynox Buxx PIX', versao: '4.0.0' }));
 
 app.post('/pix/criar', async (req, res) => {
   try {
     const { orderId, valor, produto, userId, robloxNick } = req.body;
     if (!orderId || !valor || !produto) return res.status(400).json({ erro: 'orderId, valor e produto sao obrigatorios' });
-    const txid = orderId.replace(/[^a-zA-Z0-9]/g, '').slice(0, 35);
+
+    const txid  = gerarTxid(); // sempre 35 chars alfanuméricos
     const client = await efiApi();
+
     const cob = await client.put(`/v2/cob/${txid}`, {
       calendario: { expiracao: 3600 },
       valor: { original: parseFloat(valor).toFixed(2) },
       chave: process.env.EFI_PIX_KEY,
       solicitacaoPagador: `Kynox Buxx - ${produto}`,
     });
+
     const qr = await client.get(`/v2/loc/${cob.data.loc.id}/qrcode`);
+
     pedidos[orderId] = { orderId, txid, valor, produto, userId: userId||'guest', robloxNick: robloxNick||'', status: 'pendente', criadoEm: new Date().toISOString() };
-    console.log(`[PIX] Criado: ${orderId} | R$${valor}`);
+    console.log(`[PIX] Criado: ${orderId} | txid: ${txid} | R$${valor}`);
     return res.json({ ok: true, orderId, txid, qrcode: qr.data.qrcode, qrcodeImg: qr.data.imagemQrcode, expiracao: 3600 });
   } catch (err) {
     console.error('[PIX] Erro:', JSON.stringify(err?.response?.data) || err.message);
@@ -75,7 +88,10 @@ app.get('/pix/status/:orderId', async (req, res) => {
   try {
     const client = await efiApi();
     const cob = await client.get(`/v2/cob/${pedido.txid}`);
-    if (cob.data.status === 'CONCLUIDA') { pedido.status = 'pago'; pedido.pagoEm = new Date().toISOString(); return res.json({ status: 'pago', orderId: req.params.orderId }); }
+    if (cob.data.status === 'CONCLUIDA') {
+      pedido.status = 'pago'; pedido.pagoEm = new Date().toISOString();
+      return res.json({ status: 'pago', orderId: req.params.orderId });
+    }
     return res.json({ status: pedido.status, cobranca: cob.data.status });
   } catch (err) { return res.json({ status: pedido.status }); }
 });
@@ -113,6 +129,5 @@ app.get('/pix/pedidos', (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`Kynox Buxx PIX v3.0.0 | porta ${PORT} | ${process.env.EFI_SANDBOX === 'true' ? 'SANDBOX' : 'PRODUCAO'}`);
-  console.log(`PIX Key: ${process.env.EFI_PIX_KEY}`);
+  console.log(`Kynox Buxx PIX v4.0.0 | porta ${PORT} | ${process.env.EFI_SANDBOX === 'true' ? 'SANDBOX' : 'PRODUCAO'}`);
 });
