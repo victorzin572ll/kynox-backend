@@ -17,7 +17,19 @@ app.use((req, res, next) => {
 });
 app.use(express.json());
 
-const pedidos = {};
+// ── Persistência em arquivo (sobrevive reinicialização) ──────────
+const PEDIDOS_FILE = '/tmp/pedidos.json';
+function loadPedidos() {
+  try { return JSON.parse(fs.readFileSync(PEDIDOS_FILE, 'utf8')); }
+  catch(e) { return {}; }
+}
+function savePedidos(pedidos) {
+  try { fs.writeFileSync(PEDIDOS_FILE, JSON.stringify(pedidos)); }
+  catch(e) { console.error('Erro ao salvar pedidos:', e.message); }
+}
+let pedidos = loadPedidos();
+
+// ── Efí ──────────────────────────────────────────────────────────
 const BASE_URL = 'https://pix.api.efipay.com.br';
 let _token = null, _tokenExp = 0;
 
@@ -44,23 +56,23 @@ async function efiApi() {
   return axios.create({ baseURL: BASE_URL, httpsAgent: getAgent(), headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' } });
 }
 
-// Gera txid válido: 26-35 caracteres alfanuméricos
 function gerarTxid() {
   const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
-  const len = 35;
-  let result = '';
-  for (let i = 0; i < len; i++) result += chars[Math.floor(Math.random() * chars.length)];
-  return result;
+  let r = '';
+  for (let i = 0; i < 35; i++) r += chars[Math.floor(Math.random() * chars.length)];
+  return r;
 }
 
-app.get('/', (req, res) => res.json({ ok: true, servico: 'Kynox Buxx PIX', versao: '4.0.0' }));
+// ── Health ───────────────────────────────────────────────────────
+app.get('/', (req, res) => res.json({ ok: true, servico: 'Kynox Buxx PIX', versao: '5.0.0' }));
 
+// ── POST /pix/criar ──────────────────────────────────────────────
 app.post('/pix/criar', async (req, res) => {
   try {
     const { orderId, valor, produto, userId, robloxNick } = req.body;
     if (!orderId || !valor || !produto) return res.status(400).json({ erro: 'orderId, valor e produto sao obrigatorios' });
 
-    const txid  = gerarTxid(); // sempre 35 chars alfanuméricos
+    const txid   = gerarTxid();
     const client = await efiApi();
 
     const cob = await client.put(`/v2/cob/${txid}`, {
@@ -73,7 +85,9 @@ app.post('/pix/criar', async (req, res) => {
     const qr = await client.get(`/v2/loc/${cob.data.loc.id}/qrcode`);
 
     pedidos[orderId] = { orderId, txid, valor, produto, userId: userId||'guest', robloxNick: robloxNick||'', status: 'pendente', criadoEm: new Date().toISOString() };
-    console.log(`[PIX] Criado: ${orderId} | txid: ${txid} | R$${valor}`);
+    savePedidos(pedidos);
+
+    console.log(`[PIX] Criado: ${orderId} | R$${valor} | ${produto}`);
     return res.json({ ok: true, orderId, txid, qrcode: qr.data.qrcode, qrcodeImg: qr.data.imagemQrcode, expiracao: 3600 });
   } catch (err) {
     console.error('[PIX] Erro:', JSON.stringify(err?.response?.data) || err.message);
@@ -81,53 +95,87 @@ app.post('/pix/criar', async (req, res) => {
   }
 });
 
+// ── GET /pix/status/:orderId ─────────────────────────────────────
 app.get('/pix/status/:orderId', async (req, res) => {
+  pedidos = loadPedidos(); // recarrega sempre
   const pedido = pedidos[req.params.orderId];
   if (!pedido) return res.status(404).json({ erro: 'Pedido nao encontrado' });
   if (pedido.status === 'pago') return res.json({ status: 'pago', orderId: req.params.orderId });
+
+  // Consulta ativa na Efí para garantir
   try {
     const client = await efiApi();
-    const cob = await client.get(`/v2/cob/${pedido.txid}`);
+    const cob    = await client.get(`/v2/cob/${pedido.txid}`);
     if (cob.data.status === 'CONCLUIDA') {
-      pedido.status = 'pago'; pedido.pagoEm = new Date().toISOString();
+      pedidos[req.params.orderId].status = 'pago';
+      pedidos[req.params.orderId].pagoEm = new Date().toISOString();
+      savePedidos(pedidos);
+      console.log(`[STATUS] Pago confirmado: ${req.params.orderId}`);
       return res.json({ status: 'pago', orderId: req.params.orderId });
     }
     return res.json({ status: pedido.status, cobranca: cob.data.status });
-  } catch (err) { return res.json({ status: pedido.status }); }
+  } catch (err) {
+    return res.json({ status: pedido.status });
+  }
 });
 
+// ── POST /pix/webhook ────────────────────────────────────────────
 app.post('/pix/webhook', (req, res) => {
   res.sendStatus(200);
   try {
+    pedidos = loadPedidos();
     const { pix } = req.body;
     if (!pix || !Array.isArray(pix)) return;
+    let changed = false;
     pix.forEach(p => {
       if (!p.txid) return;
       const entry = Object.values(pedidos).find(x => x.txid === p.txid);
       if (!entry || entry.status === 'pago') return;
-      entry.status = 'pago'; entry.pagoEm = p.horario || new Date().toISOString();
-      console.log(`[WEBHOOK] Pago: ${entry.orderId} | R$${p.valor}`);
+      entry.status = 'pago';
+      entry.pagoEm = p.horario || new Date().toISOString();
+      entry.valorPago = p.valor;
+      changed = true;
+      console.log(`[WEBHOOK] ✓ Pago: ${entry.orderId} | R$${p.valor}`);
     });
+    if (changed) savePedidos(pedidos);
   } catch (err) { console.error('[WEBHOOK]', err.message); }
 });
 
 app.get('/pix/webhook', (req, res) => res.sendStatus(200));
 
+// ── POST /pix/registrar-webhook ──────────────────────────────────
 app.post('/pix/registrar-webhook', async (req, res) => {
   if (req.headers['x-webhook-secret'] !== process.env.WEBHOOK_SECRET) return res.status(401).json({ erro: 'Nao autorizado' });
   try {
-    const client = await efiApi();
-    const webhookUrl = `${process.env.SITE_URL}/pix/webhook`;
+    const client     = await efiApi();
+    const webhookUrl = `https://kynox-backend-production.up.railway.app/pix/webhook`;
     await client.put(`/v2/webhook/${process.env.EFI_PIX_KEY}`, { webhookUrl });
+    console.log(`[WEBHOOK] Registrado: ${webhookUrl}`);
     return res.json({ ok: true, webhookUrl });
-  } catch (err) { return res.status(500).json({ erro: err.message }); }
+  } catch (err) {
+    console.error('[WEBHOOK] Erro:', err?.response?.data || err.message);
+    return res.status(500).json({ erro: err.message });
+  }
 });
 
+// ── GET /pix/pedidos ─────────────────────────────────────────────
 app.get('/pix/pedidos', (req, res) => {
   if (req.headers['x-webhook-secret'] !== process.env.WEBHOOK_SECRET) return res.status(401).json({ erro: 'Nao autorizado' });
+  pedidos = loadPedidos();
   return res.json(Object.values(pedidos));
 });
 
-app.listen(PORT, () => {
-  console.log(`Kynox Buxx PIX v4.0.0 | porta ${PORT} | ${process.env.EFI_SANDBOX === 'true' ? 'SANDBOX' : 'PRODUCAO'}`);
+// ── Start ────────────────────────────────────────────────────────
+app.listen(PORT, async () => {
+  console.log(`Kynox Buxx PIX v5.0.0 | porta ${PORT} | PRODUCAO`);
+
+  // Registrar webhook automaticamente
+  try {
+    const client     = await efiApi();
+    const webhookUrl = `https://kynox-backend-production.up.railway.app/pix/webhook`;
+    await client.put(`/v2/webhook/${process.env.EFI_PIX_KEY}`, { webhookUrl });
+    console.log(`[WEBHOOK] ✓ Registrado: ${webhookUrl}`);
+  } catch(e) {
+    console.log(`[WEBHOOK] Aviso: ${e?.response?.data?.mensagem || e.message}`);
+  }
 });
