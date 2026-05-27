@@ -1,4 +1,4 @@
-// server.js — Backend Kynox Buxx PIX v2.3
+// server.js — Backend Kynox Buxx PIX v2.4 — CORRIGIDO
 require('dotenv').config();
 const express = require('express');
 const cors    = require('cors');
@@ -13,13 +13,6 @@ app.options('*', cors());
 app.use(express.json());
 
 const pedidos = {};
-
-function gerarTxid() {
-  const chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
-  let txid = 'kynox';
-  for (let i = 0; i < 26; i++) txid += chars[Math.floor(Math.random() * chars.length)];
-  return txid;
-}
 
 // ═══════════════════════════════════════════════════════════════
 // GET /roblox/search?q=nick
@@ -80,7 +73,8 @@ function fetchJson(url, opts = {}) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// POST /pix/criar — v2.3: testa os formatos que efi.js aceita
+// POST /pix/criar — v2.4: passa orderId corretamente pro efi.js
+// O efi.js espera { valor, orderId, desc } — não txid!
 // ═══════════════════════════════════════════════════════════════
 app.post('/pix/criar', async (req, res) => {
   try {
@@ -95,38 +89,40 @@ app.post('/pix/criar', async (req, res) => {
       return res.status(400).json({ erro: 'Valor inválido' });
     }
 
-    const txid = gerarTxid();
+    // Gerar orderId limpo (só letras e números, máx 35 chars)
+    // O efi.js faz o replace internamente, mas o orderId precisa existir
+    const orderIdLimpo = orderId.replace(/[^a-zA-Z0-9]/g, '').slice(0, 35);
 
-    // Log para ver exatamente o que está sendo passado ao efi.js
-    console.log(`[PIX] Criando: txid=${txid} valor=${valorNum} valorStr=${valorNum.toFixed(2)}`);
+    console.log(`[PIX] Criando: orderId=${orderIdLimpo} valor=${valorNum.toFixed(2)}`);
 
-    // Tenta chamar efi.criarCobranca com o objeto completo
-    // O efi.js pode esperar { valor, txid, desc } ou outro formato
+    // efi.criarCobranca espera { valor, orderId, desc }
     const cob = await efi.criarCobranca({
-      txid,
-      valor:  valorNum.toFixed(2),   // string "3.86"
-      desc:   `Kynox Buxx - ${produto}`,
-      // Alguns efi.js também esperam esses campos:
-      nome:   robloxNick || 'Cliente',
-      cpf:    null,
+      valor:   valorNum.toFixed(2),
+      orderId: orderIdLimpo,
+      desc:    `Kynox Buxx - ${produto}`,
     });
 
     const qr = await efi.gerarQRCode(cob.loc.id);
 
     pedidos[orderId] = {
-      orderId, txid, locId: cob.loc.id,
-      valor: valorNum.toFixed(2), produto,
-      userId: userId || 'guest',
+      orderId,
+      txid:      cob.txid || orderIdLimpo,
+      locId:     cob.loc.id,
+      valor:     valorNum.toFixed(2),
+      produto,
+      userId:    userId || 'guest',
       robloxNick: robloxNick || '',
-      status: 'pendente',
-      criadoEm: new Date().toISOString(),
+      status:    'pendente',
+      criadoEm:  new Date().toISOString(),
     };
 
-    console.log(`[PIX] ✓ Criada: ${orderId} txid=${txid} R$${valorNum.toFixed(2)}`);
+    console.log(`[PIX] ✓ Criada: ${orderId} R$${valorNum.toFixed(2)}`);
 
     return res.json({
-      ok: true, orderId, txid,
-      qrcode: qr.qrcode,
+      ok:        true,
+      orderId,
+      txid:      cob.txid || orderIdLimpo,
+      qrcode:    qr.qrcode,
       qrcodeImg: qr.imagemQrcode,
       expiracao: 3600,
     });
@@ -134,7 +130,6 @@ app.post('/pix/criar', async (req, res) => {
   } catch (err) {
     const errDetail = err?.response?.data || err?.data || err?.message || String(err);
     console.error('[PIX] Erro detalhado:', JSON.stringify(errDetail));
-    console.error('[PIX] Stack:', err?.stack);
     return res.status(500).json({ erro: 'Erro ao gerar PIX. Tente novamente.' });
   }
 });
@@ -201,7 +196,7 @@ app.get('/pix/pedidos', (req, res) => {
   return res.json(Object.values(pedidos));
 });
 
-app.get('/', (req, res) => res.json({ ok: true, servico: 'Kynox Buxx PIX', versao: '2.3.0' }));
+app.get('/', (req, res) => res.json({ ok: true, servico: 'Kynox Buxx PIX', versao: '2.4.0' }));
 
 app.listen(PORT, () => {
   console.log(`\n🚀 Kynox Buxx Backend rodando na porta ${PORT}`);
