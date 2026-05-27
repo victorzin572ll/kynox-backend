@@ -1,4 +1,4 @@
-// server.js — Backend Kynox Buxx PIX v2.4 — CORRIGIDO
+// server.js — Backend Kynox Buxx PIX v2.5
 require('dotenv').config();
 const express = require('express');
 const cors    = require('cors');
@@ -13,6 +13,14 @@ app.options('*', cors());
 app.use(express.json());
 
 const pedidos = {};
+
+// Gera orderId válido para EFI: só letras+números, 26-35 chars
+function gerarOrderId() {
+  const chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+  let id = 'KB';
+  for (let i = 0; i < 28; i++) id += chars[Math.floor(Math.random() * chars.length)];
+  return id; // 30 chars exatos, sempre válido
+}
 
 // ═══════════════════════════════════════════════════════════════
 // GET /roblox/search?q=nick
@@ -73,14 +81,13 @@ function fetchJson(url, opts = {}) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// POST /pix/criar — v2.4: passa orderId corretamente pro efi.js
-// O efi.js espera { valor, orderId, desc } — não txid!
+// POST /pix/criar
 // ═══════════════════════════════════════════════════════════════
 app.post('/pix/criar', async (req, res) => {
   try {
-    const { orderId, valor, produto, userId, robloxNick } = req.body;
+    const { orderId: orderIdFront, valor, produto, userId, robloxNick } = req.body;
 
-    if (!orderId || !valor || !produto) {
+    if (!orderIdFront || !valor || !produto) {
       return res.status(400).json({ erro: 'Campos obrigatórios: orderId, valor, produto' });
     }
 
@@ -89,39 +96,39 @@ app.post('/pix/criar', async (req, res) => {
       return res.status(400).json({ erro: 'Valor inválido' });
     }
 
-    // Gerar orderId limpo (só letras e números, máx 35 chars)
-    // O efi.js faz o replace internamente, mas o orderId precisa existir
-    const orderIdLimpo = orderId.replace(/[^a-zA-Z0-9]/g, '').slice(0, 35);
+    // CORREÇÃO: gerar orderId novo com 30 chars válidos para a EFI
+    // O orderId do frontend (ex: KBMPOPVQWI4GPJ) tem só 14 chars — inválido para EFI
+    const orderId = gerarOrderId();
 
-    console.log(`[PIX] Criando: orderId=${orderIdLimpo} valor=${valorNum.toFixed(2)}`);
+    console.log(`[PIX] Criando: orderId=${orderId} (front=${orderIdFront}) valor=${valorNum.toFixed(2)}`);
 
-    // efi.criarCobranca espera { valor, orderId, desc }
     const cob = await efi.criarCobranca({
       valor:   valorNum.toFixed(2),
-      orderId: orderIdLimpo,
+      orderId: orderId,
       desc:    `Kynox Buxx - ${produto}`,
     });
 
     const qr = await efi.gerarQRCode(cob.loc.id);
 
-    pedidos[orderId] = {
-      orderId,
-      txid:      cob.txid || orderIdLimpo,
-      locId:     cob.loc.id,
-      valor:     valorNum.toFixed(2),
+    // Salva com o orderId original do front para o polling funcionar
+    pedidos[orderIdFront] = {
+      orderId:    orderIdFront,
+      txid:       cob.txid || orderId,
+      locId:      cob.loc.id,
+      valor:      valorNum.toFixed(2),
       produto,
-      userId:    userId || 'guest',
+      userId:     userId || 'guest',
       robloxNick: robloxNick || '',
-      status:    'pendente',
-      criadoEm:  new Date().toISOString(),
+      status:     'pendente',
+      criadoEm:   new Date().toISOString(),
     };
 
-    console.log(`[PIX] ✓ Criada: ${orderId} R$${valorNum.toFixed(2)}`);
+    console.log(`[PIX] ✓ Criada! orderId=${orderIdFront} txid=${cob.txid} R$${valorNum.toFixed(2)}`);
 
     return res.json({
       ok:        true,
-      orderId,
-      txid:      cob.txid || orderIdLimpo,
+      orderId:   orderIdFront,
+      txid:      cob.txid || orderId,
       qrcode:    qr.qrcode,
       qrcodeImg: qr.imagemQrcode,
       expiracao: 3600,
@@ -196,7 +203,7 @@ app.get('/pix/pedidos', (req, res) => {
   return res.json(Object.values(pedidos));
 });
 
-app.get('/', (req, res) => res.json({ ok: true, servico: 'Kynox Buxx PIX', versao: '2.4.0' }));
+app.get('/', (req, res) => res.json({ ok: true, servico: 'Kynox Buxx PIX', versao: '2.5.0' }));
 
 app.listen(PORT, () => {
   console.log(`\n🚀 Kynox Buxx Backend rodando na porta ${PORT}`);
