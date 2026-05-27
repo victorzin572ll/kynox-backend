@@ -1,4 +1,4 @@
-// server.js — Backend Kynox Buxx PIX v2.2
+// server.js — Backend Kynox Buxx PIX v2.3
 require('dotenv').config();
 const express = require('express');
 const cors    = require('cors');
@@ -14,13 +14,10 @@ app.use(express.json());
 
 const pedidos = {};
 
-// Gera txid válido para EFI: 26-35 chars, só letras e números
 function gerarTxid() {
   const chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
   let txid = 'kynox';
-  for (let i = 0; i < 26; i++) {
-    txid += chars[Math.floor(Math.random() * chars.length)];
-  }
+  for (let i = 0; i < 26; i++) txid += chars[Math.floor(Math.random() * chars.length)];
   return txid;
 }
 
@@ -55,7 +52,6 @@ app.get('/roblox/search', async (req, res) => {
     ).catch(() => ({ data: [] }));
     const avatarMap = {};
     (thumbResp.data || []).forEach(t => { avatarMap[t.targetId] = t.imageUrl; });
-
     return res.json({ data: users.map(u => ({ id: u.id, name: u.name, displayName: u.displayName, avatar: avatarMap[u.id] || null })) });
   } catch (err) {
     console.error('[ROBLOX SEARCH]', err.message);
@@ -84,7 +80,7 @@ function fetchJson(url, opts = {}) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// POST /pix/criar — CORRIGIDO: valor sempre string com 2 casas
+// POST /pix/criar — v2.3: testa os formatos que efi.js aceita
 // ═══════════════════════════════════════════════════════════════
 app.post('/pix/criar', async (req, res) => {
   try {
@@ -94,36 +90,39 @@ app.post('/pix/criar', async (req, res) => {
       return res.status(400).json({ erro: 'Campos obrigatórios: orderId, valor, produto' });
     }
 
-    // Garantir que valor é número válido
     const valorNum = parseFloat(String(valor).replace(',', '.'));
     if (isNaN(valorNum) || valorNum <= 0) {
       return res.status(400).json({ erro: 'Valor inválido' });
     }
-    // Valor como string com 2 casas decimais (formato que EFI aceita)
-    const valorStr = valorNum.toFixed(2);
 
     const txid = gerarTxid();
 
-    console.log(`[PIX] Criando cobrança: orderId=${orderId} | txid=${txid} | valor=${valorStr}`);
+    // Log para ver exatamente o que está sendo passado ao efi.js
+    console.log(`[PIX] Criando: txid=${txid} valor=${valorNum} valorStr=${valorNum.toFixed(2)}`);
 
+    // Tenta chamar efi.criarCobranca com o objeto completo
+    // O efi.js pode esperar { valor, txid, desc } ou outro formato
     const cob = await efi.criarCobranca({
-      valor: valorStr,
       txid,
-      desc: `Kynox Buxx - ${produto}`,
+      valor:  valorNum.toFixed(2),   // string "3.86"
+      desc:   `Kynox Buxx - ${produto}`,
+      // Alguns efi.js também esperam esses campos:
+      nome:   robloxNick || 'Cliente',
+      cpf:    null,
     });
 
     const qr = await efi.gerarQRCode(cob.loc.id);
 
     pedidos[orderId] = {
       orderId, txid, locId: cob.loc.id,
-      valor: valorStr, produto,
+      valor: valorNum.toFixed(2), produto,
       userId: userId || 'guest',
       robloxNick: robloxNick || '',
       status: 'pendente',
       criadoEm: new Date().toISOString(),
     };
 
-    console.log(`[PIX] ✓ Cobrança criada: ${orderId} | txid: ${txid} | R$${valorStr}`);
+    console.log(`[PIX] ✓ Criada: ${orderId} txid=${txid} R$${valorNum.toFixed(2)}`);
 
     return res.json({
       ok: true, orderId, txid,
@@ -133,9 +132,9 @@ app.post('/pix/criar', async (req, res) => {
     });
 
   } catch (err) {
-    // Log detalhado do erro para ajudar no debug
     const errDetail = err?.response?.data || err?.data || err?.message || String(err);
     console.error('[PIX] Erro detalhado:', JSON.stringify(errDetail));
+    console.error('[PIX] Stack:', err?.stack);
     return res.status(500).json({ erro: 'Erro ao gerar PIX. Tente novamente.' });
   }
 });
@@ -169,15 +168,14 @@ app.post('/pix/webhook', (req, res) => {
   try {
     const { pix } = req.body;
     if (!pix || !Array.isArray(pix)) return;
-    pix.forEach(pagamento => {
-      const { txid, valor, horario } = pagamento;
+    pix.forEach(({ txid, valor, horario }) => {
       if (!txid) return;
       const entry = Object.values(pedidos).find(p => p.txid === txid);
       if (!entry || entry.status === 'pago') return;
       entry.status = 'pago';
       entry.pagoEm = horario || new Date().toISOString();
       entry.valorPago = valor;
-      console.log(`[WEBHOOK] ✓ Pagamento confirmado: ${entry.orderId} | R$${valor}`);
+      console.log(`[WEBHOOK] ✓ Pago: ${entry.orderId} R$${valor}`);
     });
   } catch (err) {
     console.error('[WEBHOOK] Erro:', err.message);
@@ -190,21 +188,20 @@ app.post('/pix/registrar-webhook', async (req, res) => {
   const secret = req.headers['x-webhook-secret'];
   if (secret !== process.env.WEBHOOK_SECRET) return res.status(401).json({ erro: 'Não autorizado' });
   try {
-    const webhookUrl = `${process.env.SITE_URL}/pix/webhook`;
-    await efi.registrarWebhook(webhookUrl);
-    return res.json({ ok: true, webhookUrl });
+    await efi.registrarWebhook(`${process.env.SITE_URL}/pix/webhook`);
+    return res.json({ ok: true });
   } catch (err) {
     return res.status(500).json({ erro: err.message });
   }
 });
 
 app.get('/pix/pedidos', (req, res) => {
-  const secret = req.headers['x-webhook-secret'];
-  if (secret !== process.env.WEBHOOK_SECRET) return res.status(401).json({ erro: 'Não autorizado' });
+  if (req.headers['x-webhook-secret'] !== process.env.WEBHOOK_SECRET)
+    return res.status(401).json({ erro: 'Não autorizado' });
   return res.json(Object.values(pedidos));
 });
 
-app.get('/', (req, res) => res.json({ ok: true, servico: 'Kynox Buxx PIX', versao: '2.2.0' }));
+app.get('/', (req, res) => res.json({ ok: true, servico: 'Kynox Buxx PIX', versao: '2.3.0' }));
 
 app.listen(PORT, () => {
   console.log(`\n🚀 Kynox Buxx Backend rodando na porta ${PORT}`);
