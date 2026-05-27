@@ -3,12 +3,12 @@ require('dotenv').config();
 const express = require('express');
 const cors    = require('cors');
 const { v4: uuidv4 } = require('uuid');
+const https   = require('https');
 const efi     = require('./efi');
 
 const app  = express();
 const PORT = process.env.PORT || 3000;
 
-// ── CORS — permite qualquer origem ──────────────────────────────
 app.use(cors({
   origin: '*',
   methods: ['GET','POST','PUT','OPTIONS'],
@@ -17,79 +17,141 @@ app.use(cors({
 app.options('*', cors());
 app.use(express.json());
 
-// ── Pedidos em memória (em produção use um banco de dados) ───────
-// Estrutura: { [orderId]: { status, txid, locId, valor, produto, userId, ... } }
 const pedidos = {};
 
 // ═══════════════════════════════════════════════════════════════
-// POST /pix/criar — Front chama isso para criar cobrança
-// Body: { orderId, valor, produto, userId, robloxNick }
+// GET /roblox/search?q=nick — Busca usuários no Roblox
+// ═══════════════════════════════════════════════════════════════
+app.get('/roblox/search', async (req, res) => {
+  const q = (req.query.q || '').trim();
+  if (!q || q.length < 2) return res.json({ data: [] });
+
+  try {
+    // 1. Buscar IDs pelo nome
+    const searchResp = await fetchJson('https://users.roblox.com/v1/usernames/users', {
+      method: 'POST',
+      body: JSON.stringify({ usernames: [q], excludeBannedUsers: true }),
+    });
+
+    // 2. Buscar sugestões de autocomplete
+    const suggestResp = await fetchJson(
+      `https://www.roblox.com/search/users/results?keyword=${encodeURIComponent(q)}&maxRows=4&startIndex=0`
+    ).catch(() => ({ UserSearchResults: [] }));
+
+    // Juntar resultados únicos
+    const ids = new Set();
+    const users = [];
+
+    // Do autocomplete
+    (suggestResp.UserSearchResults || []).slice(0, 4).forEach(u => {
+      if (!ids.has(u.UserId)) {
+        ids.add(u.UserId);
+        users.push({ id: u.UserId, name: u.Name, displayName: u.DisplayName || u.Name });
+      }
+    });
+
+    // Da busca exata
+    (searchResp.data || []).forEach(u => {
+      if (!ids.has(u.id)) {
+        ids.add(u.id);
+        users.push({ id: u.id, name: u.name, displayName: u.displayName || u.name });
+      }
+    });
+
+    if (!users.length) return res.json({ data: [] });
+
+    // 3. Buscar avatares em lote
+    const idList = users.map(u => u.id).join(',');
+    const thumbResp = await fetchJson(
+      `https://thumbnails.roblox.com/v1/users/avatar-headshot?userIds=${idList}&size=150x150&format=Png&isCircular=false`
+    ).catch(() => ({ data: [] }));
+
+    const avatarMap = {};
+    (thumbResp.data || []).forEach(t => { avatarMap[t.targetId] = t.imageUrl; });
+
+    const result = users.map(u => ({
+      id:          u.id,
+      name:        u.name,
+      displayName: u.displayName,
+      avatar:      avatarMap[u.id] || null,
+    }));
+
+    return res.json({ data: result });
+
+  } catch (err) {
+    console.error('[ROBLOX SEARCH]', err.message);
+    return res.json({ data: [] });
+  }
+});
+
+// Helper para fetch com JSON
+function fetchJson(url, opts = {}) {
+  return new Promise((resolve, reject) => {
+    const parsed = new URL(url);
+    const options = {
+      hostname: parsed.hostname,
+      path:     parsed.pathname + parsed.search,
+      method:   opts.method || 'GET',
+      headers: {
+        'Content-Type': 'application/json',
+        'Accept':       'application/json',
+        'User-Agent':   'Mozilla/5.0',
+        ...(opts.headers || {}),
+      },
+    };
+    const req = https.request(options, resp => {
+      let data = '';
+      resp.on('data', chunk => data += chunk);
+      resp.on('end', () => {
+        try { resolve(JSON.parse(data)); }
+        catch(e) { reject(new Error('JSON parse error')); }
+      });
+    });
+    req.on('error', reject);
+    if (opts.body) req.write(opts.body);
+    req.end();
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════
+// POST /pix/criar
 // ═══════════════════════════════════════════════════════════════
 app.post('/pix/criar', async (req, res) => {
   try {
     const { orderId, valor, produto, userId, robloxNick } = req.body;
-
     if (!orderId || !valor || !produto) {
       return res.status(400).json({ erro: 'Campos obrigatórios: orderId, valor, produto' });
     }
-
-    // Criar cobrança na Efí
     const cob = await efi.criarCobranca({
       valor: parseFloat(valor).toFixed(2),
       orderId,
       desc: `Kynox Buxx - ${produto}`,
     });
-
-    // Gerar QR Code
     const qr = await efi.gerarQRCode(cob.loc.id);
-
-    // Salvar pedido
     pedidos[orderId] = {
-      orderId,
-      txid:      cob.txid,
-      locId:     cob.loc.id,
-      valor,
-      produto,
-      userId:    userId  || 'guest',
-      robloxNick: robloxNick || '',
-      status:    'pendente', // pendente | pago | expirado
-      criadoEm:  new Date().toISOString(),
+      orderId, txid: cob.txid, locId: cob.loc.id, valor, produto,
+      userId: userId || 'guest', robloxNick: robloxNick || '',
+      status: 'pendente', criadoEm: new Date().toISOString(),
     };
-
     console.log(`[PIX] Cobrança criada: ${orderId} | R$${valor} | ${produto}`);
-
     return res.json({
-      ok: true,
-      orderId,
-      txid:      cob.txid,
-      qrcode:    qr.qrcode,         // código copia-e-cola
-      qrcodeImg: qr.imagemQrcode,   // imagem base64 do QR
-      expiracao: 3600,
+      ok: true, orderId, txid: cob.txid,
+      qrcode: qr.qrcode, qrcodeImg: qr.imagemQrcode, expiracao: 3600,
     });
-
   } catch (err) {
-    console.error('[PIX] Erro ao criar cobrança:', err?.response?.data || err.message);
+    console.error('[PIX] Erro:', err?.response?.data || err.message);
     return res.status(500).json({ erro: 'Erro ao gerar PIX. Tente novamente.' });
   }
 });
 
 // ═══════════════════════════════════════════════════════════════
-// GET /pix/status/:orderId — Front consulta se foi pago
+// GET /pix/status/:orderId
 // ═══════════════════════════════════════════════════════════════
 app.get('/pix/status/:orderId', async (req, res) => {
   const { orderId } = req.params;
   const pedido = pedidos[orderId];
-
-  if (!pedido) {
-    return res.status(404).json({ erro: 'Pedido não encontrado' });
-  }
-
-  // Se já marcado como pago localmente
-  if (pedido.status === 'pago') {
-    return res.json({ status: 'pago', orderId });
-  }
-
-  // Consultar diretamente na Efí
+  if (!pedido) return res.status(404).json({ erro: 'Pedido não encontrado' });
+  if (pedido.status === 'pago') return res.json({ status: 'pago', orderId });
   try {
     const cob = await efi.consultarCobranca(pedido.txid);
     if (cob.status === 'CONCLUIDA') {
@@ -104,82 +166,50 @@ app.get('/pix/status/:orderId', async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════════
-// POST /pix/webhook — Efí chama quando pagamento é confirmado
+// POST /pix/webhook
 // ═══════════════════════════════════════════════════════════════
 app.post('/pix/webhook', (req, res) => {
-  // Efí exige resposta 200 imediata
   res.sendStatus(200);
-
   try {
     const { pix } = req.body;
     if (!pix || !Array.isArray(pix)) return;
-
     pix.forEach(pagamento => {
       const { txid, valor, horario } = pagamento;
       if (!txid) return;
-
-      // Achar pedido pelo txid
       const entry = Object.values(pedidos).find(p => p.txid === txid);
-      if (!entry) {
-        console.log(`[WEBHOOK] txid não encontrado localmente: ${txid}`);
-        return;
-      }
-
-      if (entry.status === 'pago') return; // já processado
-
+      if (!entry || entry.status === 'pago') return;
       entry.status = 'pago';
       entry.pagoEm = horario || new Date().toISOString();
       entry.valorPago = valor;
-
       console.log(`[WEBHOOK] ✓ Pagamento confirmado: ${entry.orderId} | R$${valor}`);
-
-      // Aqui você pode:
-      // - Enviar notificação Discord
-      // - Atualizar banco de dados
-      // - Enviar email ao cliente
     });
   } catch (err) {
     console.error('[WEBHOOK] Erro:', err.message);
   }
 });
 
-// ── GET /pix/webhook (Efí valida o endpoint com GET) ────────────
 app.get('/pix/webhook', (req, res) => res.sendStatus(200));
 
-// ═══════════════════════════════════════════════════════════════
-// POST /pix/registrar-webhook — Registra URL do webhook na Efí
-// Chame UMA VEZ após subir o servidor
-// ═══════════════════════════════════════════════════════════════
 app.post('/pix/registrar-webhook', async (req, res) => {
   const secret = req.headers['x-webhook-secret'];
-  if (secret !== process.env.WEBHOOK_SECRET) {
-    return res.status(401).json({ erro: 'Não autorizado' });
-  }
+  if (secret !== process.env.WEBHOOK_SECRET) return res.status(401).json({ erro: 'Não autorizado' });
   try {
     const webhookUrl = `${process.env.SITE_URL}/pix/webhook`;
     await efi.registrarWebhook(webhookUrl);
     return res.json({ ok: true, webhookUrl });
   } catch (err) {
-    console.error('[WEBHOOK] Erro ao registrar:', err?.response?.data || err.message);
     return res.status(500).json({ erro: err.message });
   }
 });
 
-// ═══════════════════════════════════════════════════════════════
-// GET /pix/pedidos — Ver todos os pedidos (protegido)
-// ═══════════════════════════════════════════════════════════════
 app.get('/pix/pedidos', (req, res) => {
   const secret = req.headers['x-webhook-secret'];
-  if (secret !== process.env.WEBHOOK_SECRET) {
-    return res.status(401).json({ erro: 'Não autorizado' });
-  }
+  if (secret !== process.env.WEBHOOK_SECRET) return res.status(401).json({ erro: 'Não autorizado' });
   return res.json(Object.values(pedidos));
 });
 
-// ── Health check ────────────────────────────────────────────────
-app.get('/', (req, res) => res.json({ ok: true, servico: 'Kynox Buxx PIX', versao: '1.0.0' }));
+app.get('/', (req, res) => res.json({ ok: true, servico: 'Kynox Buxx PIX', versao: '2.0.0' }));
 
-// ── Iniciar servidor ────────────────────────────────────────────
 app.listen(PORT, () => {
   console.log(`\n🚀 Kynox Buxx Backend rodando na porta ${PORT}`);
   console.log(`   PIX Key: ${process.env.EFI_PIX_KEY}`);
