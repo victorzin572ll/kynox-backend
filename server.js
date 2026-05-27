@@ -1,4 +1,4 @@
-// server.js — Backend Kynox Buxx PIX v2.1
+// server.js — Backend Kynox Buxx PIX v2.2
 require('dotenv').config();
 const express = require('express');
 const cors    = require('cors');
@@ -21,7 +21,7 @@ function gerarTxid() {
   for (let i = 0; i < 26; i++) {
     txid += chars[Math.floor(Math.random() * chars.length)];
   }
-  return txid; // 31 chars, dentro do padrão ^[a-zA-Z0-9]{26,35}$
+  return txid;
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -63,7 +63,6 @@ app.get('/roblox/search', async (req, res) => {
   }
 });
 
-// Helper fetch JSON
 function fetchJson(url, opts = {}) {
   return new Promise((resolve, reject) => {
     const parsed = new URL(url);
@@ -85,20 +84,30 @@ function fetchJson(url, opts = {}) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// POST /pix/criar — CORRIGIDO: txid gerado aqui, formato válido
+// POST /pix/criar — CORRIGIDO: valor sempre string com 2 casas
 // ═══════════════════════════════════════════════════════════════
 app.post('/pix/criar', async (req, res) => {
   try {
     const { orderId, valor, produto, userId, robloxNick } = req.body;
+
     if (!orderId || !valor || !produto) {
       return res.status(400).json({ erro: 'Campos obrigatórios: orderId, valor, produto' });
     }
 
-    // Gera txid válido para EFI (só letras+números, 31 chars)
+    // Garantir que valor é número válido
+    const valorNum = parseFloat(String(valor).replace(',', '.'));
+    if (isNaN(valorNum) || valorNum <= 0) {
+      return res.status(400).json({ erro: 'Valor inválido' });
+    }
+    // Valor como string com 2 casas decimais (formato que EFI aceita)
+    const valorStr = valorNum.toFixed(2);
+
     const txid = gerarTxid();
 
+    console.log(`[PIX] Criando cobrança: orderId=${orderId} | txid=${txid} | valor=${valorStr}`);
+
     const cob = await efi.criarCobranca({
-      valor: parseFloat(valor).toFixed(2),
+      valor: valorStr,
       txid,
       desc: `Kynox Buxx - ${produto}`,
     });
@@ -106,19 +115,27 @@ app.post('/pix/criar', async (req, res) => {
     const qr = await efi.gerarQRCode(cob.loc.id);
 
     pedidos[orderId] = {
-      orderId, txid, locId: cob.loc.id, valor, produto,
-      userId: userId || 'guest', robloxNick: robloxNick || '',
-      status: 'pendente', criadoEm: new Date().toISOString(),
+      orderId, txid, locId: cob.loc.id,
+      valor: valorStr, produto,
+      userId: userId || 'guest',
+      robloxNick: robloxNick || '',
+      status: 'pendente',
+      criadoEm: new Date().toISOString(),
     };
 
-    console.log(`[PIX] Cobrança criada: ${orderId} | txid: ${txid} | R$${valor}`);
+    console.log(`[PIX] ✓ Cobrança criada: ${orderId} | txid: ${txid} | R$${valorStr}`);
 
     return res.json({
       ok: true, orderId, txid,
-      qrcode: qr.qrcode, qrcodeImg: qr.imagemQrcode, expiracao: 3600,
+      qrcode: qr.qrcode,
+      qrcodeImg: qr.imagemQrcode,
+      expiracao: 3600,
     });
+
   } catch (err) {
-    console.error('[PIX] Erro:', err?.response?.data || err.message);
+    // Log detalhado do erro para ajudar no debug
+    const errDetail = err?.response?.data || err?.data || err?.message || String(err);
+    console.error('[PIX] Erro detalhado:', JSON.stringify(errDetail));
     return res.status(500).json({ erro: 'Erro ao gerar PIX. Tente novamente.' });
   }
 });
@@ -187,7 +204,7 @@ app.get('/pix/pedidos', (req, res) => {
   return res.json(Object.values(pedidos));
 });
 
-app.get('/', (req, res) => res.json({ ok: true, servico: 'Kynox Buxx PIX', versao: '2.1.0' }));
+app.get('/', (req, res) => res.json({ ok: true, servico: 'Kynox Buxx PIX', versao: '2.2.0' }));
 
 app.listen(PORT, () => {
   console.log(`\n🚀 Kynox Buxx Backend rodando na porta ${PORT}`);
