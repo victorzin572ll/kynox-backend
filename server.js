@@ -180,12 +180,14 @@ app.get('/roblox/gamepasses', async (req, res) => {
       try { items = JSON.parse(html); } catch(e) { hasMore = false; break; }
       if (!items || !items.length) { hasMore = false; break; }
 
+      // Log primeiro item para ver os campos reais
+      if (page === 1 && items.length) console.log("[GAMEPASSES] sample item:", JSON.stringify(items[0]));
       passes = passes.concat(items.map(function(item) {
         return {
-          id:    item.PassID || item.passId || item.id,
-          name:  item.Name  || item.name,
-          price: item.PriceInRobux || item.price || 0,
-          imageUrl: item.ImageURI || null,
+          id:       item.PassID    || item.passID    || item.passId    || item.id,
+          name:     item.PassName  || item.passName  || item.Name      || item.name  || item.title,
+          price:    item.PriceInRobux || item.priceInRobux || item.Price || item.price || 0,
+          imageUrl: item.ImageURI  || item.imageURI  || item.ImageUrl  || item.imageUrl || item.AssetImageUrl || null,
         };
       }));
 
