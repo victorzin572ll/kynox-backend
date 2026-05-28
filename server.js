@@ -137,15 +137,11 @@ app.get('/roblox/gamepasses', async (req, res) => {
   const universeId = (req.query.universeId || '').trim();
   if (!universeId) return res.json({ data: [] });
   try {
-    // 1. Pegar rootPlaceId correto
-    const gameResp = await fetchJson(
-      'https://games.roblox.com/v1/games?universeIds=' + universeId
-    ).catch(() => ({ data: [] }));
-    const gameData = ((gameResp.data || [])[0]) || {};
-    const placeId = gameData.rootPlaceId || universeId;
+    // placeId pode vir direto do frontend (mais confiável)
+    const placeId = (req.query.placeId || universeId).trim();
     console.log('[GAMEPASSES] universeId=' + universeId + ' placeId=' + placeId);
 
-    // 2. Buscar gamepasses paginando até trazer todas
+    // Buscar gamepasses com paginação
     let passes = [];
     let cursor = '';
     let page = 0;
@@ -153,15 +149,14 @@ app.get('/roblox/gamepasses', async (req, res) => {
       const url = 'https://games.roblox.com/v1/games/' + placeId +
         '/game-passes?sortOrder=Asc&limit=100' + (cursor ? '&cursor=' + cursor : '');
       const resp = await fetchJson(url).catch(() => ({ data: [], nextPageCursor: null }));
-      const items = resp.data || [];
-      passes = passes.concat(items);
+      passes = passes.concat(resp.data || []);
       cursor = resp.nextPageCursor || '';
       page++;
     } while (cursor && page < 5);
 
     console.log('[GAMEPASSES] encontradas via placeId: ' + passes.length);
 
-    // 3. Se não achou nada com placeId, tenta com universeId direto
+    // Se não achou, tenta com universeId
     if (!passes.length) {
       const resp2 = await fetchJson(
         'https://games.roblox.com/v1/games/' + universeId + '/game-passes?sortOrder=Asc&limit=100'
