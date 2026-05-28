@@ -137,23 +137,39 @@ app.get('/roblox/gamepasses', async (req, res) => {
   const universeId = (req.query.universeId || req.query.placeId || '').trim();
   if (!universeId) return res.json({ data: [] });
   try {
-    // 1. Buscar rootPlaceId correto via universeId
-    const gameResp = await fetchJson(
-      'https://games.roblox.com/v1/games?universeIds=' + universeId
+    // Usar catalog API para buscar gamepasses - não precisa de auth
+    const catalogResp = await fetchJson(
+      'https://catalog.roblox.com/v1/search/items?category=GamePass&universeId=' + universeId + '&limit=100&sortType=0'
     ).catch(() => ({ data: [] }));
-    const gameData = (gameResp.data || [])[0];
-    const placeId = gameData && gameData.rootPlaceId ? gameData.rootPlaceId : universeId;
-    console.log('[GAMEPASSES] universeId=' + universeId + ' rootPlaceId=' + placeId);
 
-    // 2. Buscar gamepasses usando o placeId correto
-    const gpResp = await fetchJson(
-      'https://games.roblox.com/v1/games/' + placeId + '/game-passes?sortOrder=Asc&limit=100'
-    ).catch(() => ({ data: [] }));
-    let passes = gpResp.data || [];
-    console.log('[GAMEPASSES] encontradas: ' + passes.length);
+    let passes = (catalogResp.data || []).map(item => ({
+      id: item.id,
+      name: item.name,
+      price: item.lowestPrice || item.price || 0,
+      imageUrl: null,
+    }));
+
+    console.log('[GAMEPASSES] universeId=' + universeId + ' encontradas: ' + passes.length);
+
+    // Se catalog não retornou nada, tenta a API de games diretamente
+    if (!passes.length) {
+      // Pegar rootPlaceId
+      const gameResp = await fetchJson(
+        'https://games.roblox.com/v1/games?universeIds=' + universeId
+      ).catch(() => ({ data: [] }));
+      const placeId = ((gameResp.data||[])[0]||{}).rootPlaceId || universeId;
+
+      const gpResp = await fetchJson(
+        'https://games.roblox.com/v1/games/' + placeId + '/game-passes?sortOrder=Asc&limit=100'
+      ).catch(() => ({ data: [] }));
+      passes = (gpResp.data || []).map(p => ({
+        id: p.id, name: p.name, price: p.price || 0, imageUrl: null
+      }));
+      console.log('[GAMEPASSES] fallback placeId=' + placeId + ' encontradas: ' + passes.length);
+    }
 
     if (passes.length) {
-      // 3. Buscar thumbnails das gamepasses
+      // Buscar thumbnails
       const gpIds = passes.map(p => p.id).join(',');
       const thumbResp = await fetchJson(
         'https://thumbnails.roblox.com/v1/game-passes?gamePassIds=' + gpIds + '&size=150x150&format=Png'
