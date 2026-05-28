@@ -131,20 +131,29 @@ app.get('/roblox/game-icons', async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════════
-// GET /roblox/gamepasses?placeId=123 — gamepasses de um jogo com thumbnails
+// GET /roblox/gamepasses?universeId=123 — gamepasses de um jogo
 // ═══════════════════════════════════════════════════════════════
 app.get('/roblox/gamepasses', async (req, res) => {
-  const placeId = (req.query.placeId || '').trim();
-  if (!placeId) return res.json({ data: [] });
+  const universeId = (req.query.universeId || req.query.placeId || '').trim();
+  if (!universeId) return res.json({ data: [] });
   try {
-    // Buscar gamepasses
+    // 1. Buscar rootPlaceId correto via universeId
+    const gameResp = await fetchJson(
+      'https://games.roblox.com/v1/games?universeIds=' + universeId
+    ).catch(() => ({ data: [] }));
+    const gameData = (gameResp.data || [])[0];
+    const placeId = gameData && gameData.rootPlaceId ? gameData.rootPlaceId : universeId;
+    console.log('[GAMEPASSES] universeId=' + universeId + ' rootPlaceId=' + placeId);
+
+    // 2. Buscar gamepasses usando o placeId correto
     const gpResp = await fetchJson(
       'https://games.roblox.com/v1/games/' + placeId + '/game-passes?sortOrder=Asc&limit=100'
-    );
+    ).catch(() => ({ data: [] }));
     let passes = gpResp.data || [];
+    console.log('[GAMEPASSES] encontradas: ' + passes.length);
 
     if (passes.length) {
-      // Buscar thumbnails das gamepasses
+      // 3. Buscar thumbnails das gamepasses
       const gpIds = passes.map(p => p.id).join(',');
       const thumbResp = await fetchJson(
         'https://thumbnails.roblox.com/v1/game-passes?gamePassIds=' + gpIds + '&size=150x150&format=Png'
@@ -156,7 +165,7 @@ app.get('/roblox/gamepasses', async (req, res) => {
 
     return res.json({ data: passes });
   } catch (err) {
-    console.error('[GAMEPASSES]', err.message);
+    console.error('[GAMEPASSES] Erro:', err.message);
     return res.json({ data: [] });
   }
 });
