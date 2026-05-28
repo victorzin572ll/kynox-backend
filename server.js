@@ -205,23 +205,53 @@ app.get('/roblox/gamepasses', async (req, res) => {
       console.log('[GAMEPASSES] catalog IDs encontrados: ' + catalogIds.length);
 
       if (catalogIds.length) {
-        // Buscar detalhes completos de cada pass via economy API
-        const detailResults = await Promise.all(
-          catalogIds.map(function(id) {
-            return fetchJson('https://economy.roblox.com/v1/game-pass/' + id + '/product-info')
-              .catch(function() { return null; });
-          })
-        );
-        passes = detailResults
-          .filter(function(d) { return d && d.TargetId; })
-          .map(function(d) {
+        // Buscar detalhes em lote via catalog/v1/catalog/items/details (POST)
+        const batchResp = await fetchJson(
+          'https://catalog.roblox.com/v1/catalog/items/details',
+          {
+            method: 'POST',
+            body: JSON.stringify({
+              items: catalogIds.map(function(id) { return { itemType: 'GamePass', id: id }; })
+            })
+          }
+        ).catch(function() { return { data: [] }; });
+
+        const batchItems = batchResp.data || [];
+        console.log('[GAMEPASSES] batch detalhes: ' + batchItems.length);
+
+        if (batchItems.length) {
+          passes = batchItems.map(function(item) {
             return {
-              id:       d.TargetId,
-              name:     d.Name || 'GamePass',
-              price:    d.PriceInRobux || 0,
+              id:       item.id,
+              name:     item.name || 'GamePass',
+              price:    item.lowestPrice || item.price || item.priceInRobux || 0,
               imageUrl: null,
             };
           });
+        } else {
+          // Ultimo fallback: usar os IDs sem detalhes e buscar nome via asset API
+          const assetResp = await fetchJson(
+            'https://assetdelivery.roblox.com/v1/assetId/' + catalogIds[0]
+          ).catch(function() { return {}; });
+          console.log('[GAMEPASSES] asset sample:', JSON.stringify(assetResp));
+
+          // Montar passes só com ID e buscar detalhes via marketplace
+          const mktResp = await fetchJson(
+            'https://catalog.roblox.com/v1/search/items/details?category=GamePass&universeId=' + universeId + '&limit=30'
+          ).catch(function() { return { data: [] }; });
+          const mktItems = mktResp.data || [];
+          console.log('[GAMEPASSES] marketplace details: ' + mktItems.length);
+          if (mktItems.length) {
+            passes = mktItems.map(function(item) {
+              return {
+                id:       item.id,
+                name:     item.name || 'GamePass',
+                price:    item.lowestPrice || item.unitsAvailableForPurchase || 0,
+                imageUrl: null,
+              };
+            });
+          }
+        }
         console.log('[GAMEPASSES] detalhes obtidos: ' + passes.length);
       }
     }
