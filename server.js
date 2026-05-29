@@ -161,124 +161,77 @@ app.get('/roblox/gamepasses', async (req, res) => {
   try {
     console.log('[GAMEPASSES] universeId=' + universeId + ' placeId=' + placeId);
 
-    // Rota pública do Roblox que não precisa de autenticação
-    // Busca por página (cada página tem até 10 passes)
+    // Usar a API correta: /groups/{groupId}/items não funciona
+    // A unica API publica que retorna gamepasses de um jogo especifico é:
+    // GET https://games.roblox.com/v1/games/{placeId}/game-passes
+    // Mas precisa de cookie. Alternativa: scraping da pagina web do jogo
+
+    // Tentar buscar via pagina HTML do Roblox (retorna JSON embutido)
     let passes = [];
-    let page = 1;
-    let hasMore = true;
 
-    while (hasMore && page <= 20) {
-      const url = 'https://www.roblox.com/game-pass/get-passes?placeId=' + placeId + '&pageNumber=' + page;
-      const html = await fetchRaw(url).catch(() => '');
+    // Metodo 1: API publica sem auth (funciona para alguns jogos)
+    const resp1 = await fetchJson(
+      'https://games.roblox.com/v1/games/' + placeId + '/game-passes?sortOrder=Asc&limit=100'
+    ).catch(() => ({ data: [] }));
+    passes = resp1.data || [];
+    console.log('[GAMEPASSES] metodo1 placeId: ' + passes.length);
 
-      if (!html || html.includes('[]') || html === '[]' || html.trim() === '') {
-        hasMore = false;
-        break;
-      }
-
-      let items = [];
-      try { items = JSON.parse(html); } catch(e) { hasMore = false; break; }
-      if (!items || !items.length) { hasMore = false; break; }
-
-      // Log primeiro item para ver os campos reais
-      if (page === 1 && items.length) console.log("[GAMEPASSES] sample item:", JSON.stringify(items[0]));
-      passes = passes.concat(items.map(function(item) {
-        return {
-          id:       item.PassID    || item.passID    || item.passId    || item.id,
-          name:     item.PassName  || item.passName  || item.Name      || item.name  || item.title,
-          price:    item.PriceInRobux || item.priceInRobux || item.Price || item.price || 0,
-          imageUrl: item.ImageURI  || item.imageURI  || item.ImageUrl  || item.imageUrl || item.AssetImageUrl || null,
-        };
-      }));
-
-      page++;
-    }
-
-    console.log('[GAMEPASSES] encontradas: ' + passes.length);
-
-    // Fallback: catalog API para pegar os IDs
+    // Metodo 2: tentar com universeId
     if (!passes.length) {
-      const marketResp = await fetchJson(
-        'https://catalog.roblox.com/v1/search/items?category=GamePass&universeId=' + universeId + '&limit=30'
+      const resp2 = await fetchJson(
+        'https://games.roblox.com/v1/games/' + universeId + '/game-passes?sortOrder=Asc&limit=100'
       ).catch(() => ({ data: [] }));
-      const catalogIds = (marketResp.data || []).map(function(item) { return item.id; });
-      console.log('[GAMEPASSES] catalog IDs encontrados: ' + catalogIds.length);
+      passes = resp2.data || [];
+      console.log('[GAMEPASSES] metodo2 universeId: ' + passes.length);
+    }
 
-      if (catalogIds.length) {
-        // Buscar detalhes em lote via catalog/v1/catalog/items/details (POST)
-        const batchResp = await fetchJson(
-          'https://catalog.roblox.com/v1/catalog/items/details',
-          {
-            method: 'POST',
-            body: JSON.stringify({
-              items: catalogIds.map(function(id) { return { itemType: 'GamePass', id: id }; })
-            })
-          }
-        ).catch(function() { return { data: [] }; });
+    // Metodo 3: buscar IDs do catalog e detalhes via productinfo (sem auth)
+    if (!passes.length) {
+      // Catalog retorna IDs corretos
+      const catResp = await fetchJson(
+        'https://catalog.roblox.com/v1/search/items?category=GamePass&universeId=' + universeId + '&limit=30&sortType=3'
+      ).catch(() => ({ data: [] }));
+      const ids = (catResp.data || []).map(function(i) { return i.id; });
+      console.log('[GAMEPASSES] catalog ids: ' + ids.length);
 
-        const batchItems = batchResp.data || [];
-        console.log('[GAMEPASSES] batch detalhes: ' + batchItems.length);
-
-        if (batchItems.length) {
-          passes = batchItems.map(function(item) {
-            return {
-              id:       item.id,
-              name:     item.name || 'GamePass',
-              price:    item.lowestPrice || item.price || item.priceInRobux || 0,
-              imageUrl: null,
-            };
-          });
-        } else {
-          // Ultimo fallback: usar os IDs sem detalhes e buscar nome via asset API
-          const assetResp = await fetchJson(
-            'https://assetdelivery.roblox.com/v1/assetId/' + catalogIds[0]
-          ).catch(function() { return {}; });
-          console.log('[GAMEPASSES] asset sample:', JSON.stringify(assetResp));
-
-          // Montar passes só com ID e buscar detalhes via marketplace
-          const mktResp = await fetchJson(
-            'https://catalog.roblox.com/v1/search/items/details?category=GamePass&universeId=' + universeId + '&limit=30'
-          ).catch(function() { return { data: [] }; });
-          const mktItems = mktResp.data || [];
-          console.log('[GAMEPASSES] marketplace details: ' + mktItems.length);
-          if (mktItems.length) {
-            passes = mktItems.map(function(item) {
-              return {
-                id:       item.id,
-                name:     item.name || 'GamePass',
-                price:    item.lowestPrice || item.unitsAvailableForPurchase || 0,
-                imageUrl: null,
-              };
-            });
-          }
-        }
-        console.log('[GAMEPASSES] detalhes obtidos: ' + passes.length);
+      if (ids.length) {
+        // productinfo nao precisa de auth para gamepasses publicas
+        const details = await Promise.all(ids.map(function(id) {
+          return fetchJson('https://api.roblox.com/marketplace/productinfo?assetId=' + id)
+            .catch(function() { return null; });
+        }));
+        passes = details.filter(function(d) { return d && d.Name; }).map(function(d) {
+          return {
+            id:    d.TargetId || d.AssetId,
+            name:  d.Name,
+            price: d.PriceInRobux || 0,
+          };
+        });
+        console.log('[GAMEPASSES] productinfo: ' + passes.length);
       }
     }
 
-    // Buscar thumbnails em lote
+    // Buscar thumbnails
     if (passes.length) {
-      const validIds = passes.filter(p => p.id).map(p => p.id).join(',');
-      if (validIds) {
-        const thumbResp = await fetchJson(
-          'https://thumbnails.roblox.com/v1/game-passes?gamePassIds=' + validIds + '&size=150x150&format=Png'
-        ).catch(() => ({ data: [] }));
-        const thumbMap = {};
-        (thumbResp.data || []).forEach(function(t) { thumbMap[t.targetId] = t.imageUrl; });
-        passes = passes.map(function(p) {
-          return Object.assign({}, p, { imageUrl: p.imageUrl || thumbMap[p.id] || null });
-        });
-      }
+      const ids = passes.filter(function(p){return p.id;}).map(function(p){return p.id;}).join(',');
+      const thumbResp = await fetchJson(
+        'https://thumbnails.roblox.com/v1/game-passes?gamePassIds=' + ids + '&size=150x150&format=Png'
+      ).catch(function(){ return {data:[]}; });
+      const thumbMap = {};
+      (thumbResp.data||[]).forEach(function(t){ thumbMap[t.targetId] = t.imageUrl; });
+      passes = passes.map(function(p){
+        return Object.assign({}, p, { imageUrl: thumbMap[p.id] || null });
+      });
     }
 
     console.log('[GAMEPASSES] retornando: ' + passes.length);
     return res.json({ data: passes });
+
   } catch (err) {
     console.error('[GAMEPASSES] Erro:', err.message);
     return res.json({ data: [] });
   }
 });
-
 // ═══════════════════════════════════════════════════════════════
 // POST /pix/criar
 // ═══════════════════════════════════════════════════════════════
